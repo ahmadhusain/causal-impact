@@ -1,0 +1,198 @@
+---
+title: Causal Impact on Leads Generation
+author: Ahmad Husain Abdullah
+output:
+  html_document:
+    df_print: paged
+    highlight: tango
+    theme: cosmo
+    toc: yes
+    toc_float:
+      collapsed: no
+  word_document:
+    toc: yes
+---
+
+# Background
+
+In the business process, the marketing team has a role to play in increasing the brand awareness of a product. When the marketing team's efforts are successful to get the customer's attention to find out the product, it will generate a lead. In a simple way, leads are people who are interested in a business product. 
+
+In the digital era, leads can be interpreted as people who visit websites directly or through advertisements, people who like, share content or product campaigns. Then, these prospective customers will be saved and then directed to the sales team. Lots of efforts can be made to generate a lead. Starting from creating creative content, advertising, writing articles, distributing e-books, promo codes and so on.
+
+# Modeling
+
+
+```{r setup, include=FALSE}
+# clean up the environment
+rm(list = ls())
+
+# setup chunk options
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  comment = "#>"
+)
+```
+
+```{r}
+library(tidyverse)
+library(CausalImpact)
+library(readxl)
+library(forecast)
+library(TSstudio)
+library(lubridate)
+```
+
+The data comes from the results of a website **googleanalytics**. For post-period modeling, the previous 37 days will be used as training data. The business question is that on the next day, after the campaign conducted, is it getting a significant increase in leads?
+
+```{r}
+data <- read_csv("http://bit.ly/causal-impact-data")
+
+glimpse(data)
+```
+
+We select several columns that are the focus of this analysis, `datetime` (daily) and `unique views` which contain information on how many people visited the website page.
+
+```{r}
+actual <- data %>% 
+  mutate(
+    datetime = lubridate::as_datetime(as.character(datetime))
+  ) %>% 
+  dplyr::select(datetime, unique_views) %>% 
+  na.omit()
+
+head(actual)
+```
+
+> Next we will do some exploratory analysis, which day is the most leads generation?
+
+```{r}
+actual %>% 
+  mutate(
+    wdays = lubridate::wday(datetime, label = TRUE)
+  ) %>% 
+  group_by(wdays) %>% 
+  summarise(total_views = sum(unique_views)) %>% 
+  ungroup() %>% 
+  mutate(
+    label = scales::comma(total_views)
+  ) %>% 
+  ggplot(
+    mapping = aes(x = wdays, y = total_views)
+  ) +
+  geom_col(fill = "steelblue", alpha  = 0.7) +
+  labs(
+    title = "Total Views Per Days",
+    subtitle = "Period: May to July",
+    y = NULL,
+    x = "Day of Week"
+  ) +
+  geom_text(
+    aes(label = label, y = total_views + max(total_views) * 0.075) , size = 3
+  ) +
+  theme_minimal()
+```
+
+Leads generation is highest on Wednesday. This information can be taken into consideration in determining the day to start the campaign.
+
+
+Next we will be subset 37 days before the campaign and saved to the `pre_campaign` object. So we can see the movement of leads and think about the increase that has been generated since the campaign was initiated.
+
+```{r}
+pre_campaign <- actual %>% 
+  slice(1:37)
+```
+Next, create time series objects and do modeling to make a banchmark of leads that we can get if we don't use campaigns. We will use Holtwinter as a method to forecast the next 16 days.
+
+```{r}
+ts_campaign <- ts(pre_campaign$unique_views, frequency = 7)
+fit_hw <- HoltWinters(ts_campaign)
+forecast <- forecast(fit_hw, 16)
+```
+
+We append the data for the period before the campaign and the results of the forecast which are saved to the append_data object.
+
+```{r}
+forecast_data <- data_frame(
+  datetime = as_datetime(
+    seq.Date(
+      from = as.Date("2018-06-24"),
+      by = "day",
+      length.out = 16)
+    ),
+  unique_views = forecast$mean
+)
+
+append_data <- pre_campaign %>% bind_rows(forecast_data)
+```
+
+```{r}
+ggplot(data = append_data, mapping = aes(x = datetime, y = unique_views)) +
+  geom_line(col = "steelblue", alpha = 0.5, size = 1.2) +
+  geom_point(col = "black", size = 1.5) +
+  labs(
+    title = "Forecast Projection",
+    y = "Total Unique Views"
+  ) +
+  theme_minimal()
+```
+
+And we also have actual data for that period. We have noticed an increase in total website visitors.
+
+```{r}
+actual %>% 
+  ggplot(mapping = aes(x = datetime, y = unique_views)) + 
+  geom_line(color = "steelblue", size = 1.2, alpha = 0.6) +
+  geom_point(col = "black", size = 1.5) +
+  labs(
+    title = "Actual data on the number of website visitors",
+    subtitle = "16 May to 17 July",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+To estimate the causal effect, we begin by determining which period in the data should be used to train the model (the pre-intervention period) and which period to calculate the **counterfactual** prediction (the post-intervention period).
+
+```{r}
+pre <- c(1,37)
+post <- c(38, 53)
+```
+
+The code above means that the 1st to 37th observation points will be used for training, and the 38th to 53th observation points to calculate predictions, or we can also define them in the date interval format. Then change the data to a matrix format as a condition for analysis with the `CausalImpact` packages.
+
+```{r}
+pre <- as.Date(c("2018-05-16", "2018-06-24"))
+post <- as.Date(c("2018-06-25", "2018-07-10"))
+
+time.points <- seq.Date(as.Date("2018-05-16"), by = "days", length.out = 53)
+data_ci <- zoo(
+  cbind(actual$unique_views, append_data$unique_views), 
+  time.points
+)
+```
+
+Now we have the data ready to verify the causal effect of the campaign.
+
+```{r}
+impact <- CausalImpact(data = data_ci, pre.period = pre, post.period = post)
+plot(impact)
+```
+
+By default, the plot contains three panels. The `original` first panel shows *counter-factual* data and predictions for the post campaign period. The second panel `pointwise` shows the difference between the actual observed (leads) and the predicted data. The third `cumulative` panel describes the cumulative effects of the intervention (campaign) conducted.
+
+These results assume that the relationship between leads generation and the observed time series, as determined during the pre-period, remains stable throughout the post-period. We can view the statistical information by using the command `summary(impact)`
+
+```{r}
+summary(impact)
+```
+
+We can get information from the actual and predicted effect (average) and their absolute and relative effects. The output of statistical information above says, leads generation after the campaign has increased by 44%, from the estimated average website visitors of 984 people to 1417 in reality.
+
+For guidance on correct interpretation of summary table results, the CausalImpact packages provide its interpretation text, which we can print using the command:
+
+```{r}
+interpretation <- summary(impact, "report")
+```
+
